@@ -1,286 +1,376 @@
-import { useEffect, useMemo, useState } from 'react';
-import { AuthGate } from './components/AuthGate';
-import { LeftSidebar } from './components/LeftSidebar';
-import { SectionCard } from './components/SectionCard';
-import { WorkspacePanels } from './components/WorkspacePanels';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import referenceHtmlRaw from './reference.html?raw';
 import { supabase } from './lib/supabase';
-import { loadLocalCache, saveLocalCache } from './lib/storage';
-import { seedWorkspace } from './lib/seed';
-import type { BookmarkRecord, HistoryRecord, NoteRecord, PanelType, SectionRecord, SnapshotRecord } from './types/app';
+import { Sidebar } from './components/Sidebar';
+import { TopBar } from './components/TopBar';
+import { RightRail } from './components/RightRail';
+import { SaqReferencePage } from './components/SaqReferencePage';
+import './layout-shell.css';
 
-interface CacheShape {
-  sections: SectionRecord[];
-  notes: NoteRecord[];
-  bookmarks: BookmarkRecord[];
-  snapshots: SnapshotRecord[];
-  history: HistoryRecord[];
+type SessionUser = {
+  id: string;
+  email: string;
+};
+
+type BridgeMessage =
+  | { type: 'pci-helpdesk-signout' }
+  | { type: 'pci-helpdesk-section-change'; section: string };
+
+const NATIVE_SECTIONS = new Set(['saqref']);
+
+function patchReferenceHtml(html: string) {
+  const bridgeStyles = `
+#sidebar,
+#topbar,
+#note-toolbar,
+#workspace-fab-stack,
+#bld-fab,
+#bld-sidebar-footer,
+#react-bridge-signout {
+  display: none !important;
 }
-
-function uuid() {
-  return crypto.randomUUID();
+body {
+  display: block !important;
+  background: transparent !important;
+  min-height: auto !important;
+  overflow-x: hidden !important;
 }
+#main {
+  margin-left: 0 !important;
+  min-height: auto !important;
+}
+#content {
+  padding: 0 !important;
+}
+.section {
+  max-width: 920px !important;
+}
+.workspace-fab-stack,
+.workspace-panel {
+  display: none !important;
+}
+`;
 
-function now() {
-  return new Date().toISOString();
+  const bridgeScript = `
+<script>
+(function () {
+  function notifySection() {
+    try {
+      var sec =
+        (typeof activeSection === 'function' && activeSection()) ||
+        document.querySelector('.section.active') ||
+        document.querySelector('.section');
+      var id = sec && sec.id ? sec.id.replace(/^section-/, '') : 'quickref';
+      window.parent.postMessage({ type: 'pci-helpdesk-section-change', section: id }, '*');
+    } catch (e) {}
+  }
+
+  function callShow(section) {
+    if (typeof window.show === 'function') {
+      window.show(section);
+      setTimeout(notifySection, 0);
+    }
+  }
+
+  function clickBySelector(selector) {
+    var el = document.querySelector(selector);
+    if (el) el.click();
+  }
+
+  window.addEventListener('message', function (event) {
+    var data = event.data || {};
+    if (data.type === 'pci-helpdesk-show-section' && data.section) {
+      callShow(data.section);
+    }
+    if (data.type === 'pci-helpdesk-search') {
+      if (typeof window.doSearch === 'function') window.doSearch(data.query || '');
+    }
+    if (data.type === 'pci-helpdesk-clear-search') {
+      if (typeof window.clearSearch === 'function') window.clearSearch();
+    }
+    if (data.type === 'pci-helpdesk-open-panel' && data.panel) {
+      clickBySelector('[data-open-panel="' + data.panel + '"]');
+    }
+    if (data.type === 'pci-helpdesk-trigger' && data.action === 'builder') {
+      clickBySelector('#bld-fab');
+    }
+    if (data.type === 'pci-helpdesk-trigger' && data.action === 'note') {
+      clickBySelector('#global-note-arm-btn');
+    }
+    if (data.type === 'pci-helpdesk-trigger' && data.action === 'locator') {
+      clickBySelector('#note-locator-btn');
+    }
+  });
+
+  var originalShow = window.show;
+  if (typeof originalShow === 'function' && !window.__pciBridgeWrappedShow) {
+    window.show = function () {
+      var result = originalShow.apply(this, arguments);
+      setTimeout(notifySection, 0);
+      return result;
+    };
+    window.__pciBridgeWrappedShow = true;
+  }
+
+  window.addEventListener('load', function () {
+    setTimeout(notifySection, 60);
+  });
+
+  setTimeout(notifySection, 120);
+})();
+<\/script>`;
+
+  let output = html;
+
+  if (output.includes('</style>')) {
+    output = output.replace('</style>', `${bridgeStyles}\n</style>`);
+  }
+
+  if (!output.includes('__pciBridgeWrappedShow')) {
+    output = output.replace('</body>', `${bridgeScript}\n</body>`);
+  }
+
+  return output;
 }
 
 export default function App() {
-  const [sessionReady, setSessionReady] = useState(false);
-  const [userId, setUserId] = useState<string | null>(null);
-  const [sections, setSections] = useState<SectionRecord[]>([]);
-  const [notes, setNotes] = useState<NoteRecord[]>([]);
-  const [bookmarks, setBookmarks] = useState<BookmarkRecord[]>([]);
-  const [snapshots, setSnapshots] = useState<SnapshotRecord[]>([]);
-  const [history, setHistory] = useState<HistoryRecord[]>([]);
-  const [activeSectionId, setActiveSectionId] = useState<string | null>(null);
-  const [builderMode, setBuilderMode] = useState(true);
-  const [autosaveLabel, setAutosaveLabel] = useState('Autosave ready');
-  const [openPanel, setOpenPanel] = useState<PanelType | null>(null);
-  const [searchText, setSearchText] = useState('');
-  const [searchType, setSearchType] = useState<'all' | 'notes' | 'content' | 'bookmarks'>('all');
+  const [loading, setLoading] = useState(true);
+  const [user, setUser] = useState<SessionUser | null>(null);
+  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [authMessage, setAuthMessage] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
+  const [activeSection, setActiveSection] = useState('quickref');
+  const [searchValue, setSearchValue] = useState('');
+  const [iframeMasked, setIframeMasked] = useState(false);
+
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const activeSectionRef = useRef('quickref');
+  const pendingIframeSectionRef = useRef<string | null>('quickref');
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setUserId(data.session?.user.id ?? null);
-      setSessionReady(true);
+    activeSectionRef.current = activeSection;
+  }, [activeSection]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (!mounted) return;
+      if (error) setAuthMessage(error.message);
+      const sessionUser = data.session?.user;
+      setUser(sessionUser ? { id: sessionUser.id, email: sessionUser.email || '' } : null);
+      setLoading(false);
     });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUserId(session?.user.id ?? null);
-      setSessionReady(true);
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      const sessionUser = session?.user;
+      setUser(sessionUser ? { id: sessionUser.id, email: sessionUser.email || '' } : null);
+      setLoading(false);
     });
-    return () => listener.subscription.unsubscribe();
+
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as BridgeMessage | undefined;
+      if (!data || typeof data !== 'object' || !('type' in data)) return;
+
+      if (data.type === 'pci-helpdesk-signout') {
+        void handleSignOut();
+        return;
+      }
+
+      if (data.type === 'pci-helpdesk-section-change' && typeof data.section === 'string') {
+        if (NATIVE_SECTIONS.has(activeSectionRef.current)) {
+          return;
+        }
+
+        if (pendingIframeSectionRef.current) {
+          if (data.section === pendingIframeSectionRef.current) {
+            pendingIframeSectionRef.current = null;
+            setActiveSection(data.section);
+            setIframeMasked(false);
+          }
+          return;
+        }
+
+        setActiveSection(data.section);
+      }
+    };
+
+    window.addEventListener('message', onMessage);
+
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+      window.removeEventListener('message', onMessage);
+    };
   }, []);
 
   useEffect(() => {
-    if (!userId) return;
-    void loadWorkspace(userId);
-  }, [userId]);
+    if (activeSection === 'saqref') return;
+    iframeRef.current?.contentWindow?.postMessage(
+      { type: 'pci-helpdesk-search', query: searchValue },
+      '*',
+    );
+  }, [searchValue, activeSection]);
 
-  useEffect(() => {
-    if (!userId) return;
-    const payload: CacheShape = { sections, notes, bookmarks, snapshots, history };
-    saveLocalCache(payload);
-  }, [userId, sections, notes, bookmarks, snapshots, history]);
+  const referenceHtml = useMemo(() => patchReferenceHtml(referenceHtmlRaw), []);
 
-  async function loadWorkspace(currentUserId: string) {
-    const cache = loadLocalCache<CacheShape>();
-    if (cache?.sections?.length) {
-      setSections(cache.sections);
-      setNotes(cache.notes || []);
-      setBookmarks(cache.bookmarks || []);
-      setSnapshots(cache.snapshots || []);
-      setHistory(cache.history || []);
-      setActiveSectionId(cache.sections[0]?.id ?? null);
+  function postToIframe(payload: Record<string, unknown>) {
+    iframeRef.current?.contentWindow?.postMessage(payload, '*');
+  }
+
+  function sendSectionToIframe(section: string) {
+    postToIframe({ type: 'pci-helpdesk-show-section', section });
+    window.setTimeout(() => {
+      postToIframe({ type: 'pci-helpdesk-show-section', section });
+    }, 80);
+  }
+
+  function handleNavigate(section: string) {
+    if (section === 'saqref') {
+      setActiveSection('saqref');
+      return;
     }
 
-    const [{ data: sectionRows }, { data: noteRows }, { data: bookmarkRows }, { data: snapshotRows }, { data: historyRows }] = await Promise.all([
-      supabase.from('sections').select('*').eq('user_id', currentUserId).order('position'),
-      supabase.from('notes').select('*').eq('user_id', currentUserId).order('created_at', { ascending: false }),
-      supabase.from('bookmarks').select('*').eq('user_id', currentUserId).order('created_at', { ascending: false }),
-      supabase.from('snapshots').select('*').eq('user_id', currentUserId).order('created_at', { ascending: false }),
-      supabase.from('change_logs').select('*').eq('user_id', currentUserId).order('created_at', { ascending: false }),
-    ]);
+    pendingIframeSectionRef.current = section;
+    setActiveSection(section);
+    setIframeMasked(true);
+    sendSectionToIframe(section);
+  }
 
-    if (!sectionRows || sectionRows.length === 0) {
-      const starterSections = seedWorkspace.sections.map((section) => ({ ...section, user_id: currentUserId, created_at: now(), updated_at: now() }));
-      const { data: inserted } = await supabase.from('sections').insert(starterSections).select();
-      setSections((inserted as SectionRecord[]) || starterSections);
-      setActiveSectionId(starterSections[0]?.id ?? null);
-    } else {
-      setSections(sectionRows as SectionRecord[]);
-      setActiveSectionId((sectionRows as SectionRecord[])[0]?.id ?? null);
+  function handleOpenPanel(name: 'search' | 'bookmarks' | 'backup' | 'history') {
+    postToIframe({ type: 'pci-helpdesk-open-panel', panel: name });
+  }
+
+  function handleTrigger(action: 'builder' | 'note' | 'locator') {
+    postToIframe({ type: 'pci-helpdesk-trigger', action });
+  }
+
+  async function handleAuthSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setAuthBusy(true);
+    setAuthMessage('');
+
+    try {
+      if (authMode === 'signin') {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.auth.signUp({ email, password });
+        if (error) throw error;
+        setAuthMessage('Account created. Check your email if confirmation is enabled, then sign in.');
+        setAuthMode('signin');
+      }
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : 'Authentication failed.');
+    } finally {
+      setAuthBusy(false);
     }
-
-    setNotes((noteRows as NoteRecord[]) || []);
-    setBookmarks((bookmarkRows as BookmarkRecord[]) || []);
-    setSnapshots((snapshotRows as SnapshotRecord[]) || []);
-    setHistory((historyRows as HistoryRecord[]) || []);
   }
 
-  async function addHistoryEntry(type: string, label: string, meta: Record<string, unknown> = {}) {
-    if (!userId) return;
-    const record: HistoryRecord = { id: uuid(), user_id: userId, type, label, meta, created_at: now() };
-    setHistory((prev) => [record, ...prev].slice(0, 300));
-    await supabase.from('change_logs').insert(record);
+  async function handleSignOut() {
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      setAuthMessage(error.message);
+      return;
+    }
+    setUser(null);
   }
 
-  function scheduleAutosave(message: string, callback: () => Promise<void> | void) {
-    setAutosaveLabel('Saving...');
-    window.setTimeout(async () => {
-      await callback();
-      setAutosaveLabel(message);
-    }, 450);
+  if (loading) {
+    return <div className="app-loading">Loading PCI Helpdesk…</div>;
   }
 
-  function jumpToSection(id: string) {
-    setActiveSectionId(id);
-    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (!user) {
+    return (
+      <div className="auth-wrap">
+        <form className="auth-card" onSubmit={handleAuthSubmit}>
+          <div className="auth-kicker">PCI Helpdesk</div>
+          <h1>Agent Reference Web App</h1>
+          <p>This version safely extracts the full SAQ Reference page into React while the rest of the app still uses the HTML bridge.</p>
+
+          <input
+            type="email"
+            placeholder="Email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+          />
+
+          {authMessage ? <div className="auth-message">{authMessage}</div> : null}
+
+          <div className="auth-actions">
+            <button type="submit" disabled={authBusy}>
+              {authBusy ? 'Please wait…' : authMode === 'signin' ? 'Sign In' : 'Create Account'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode((prev) => (prev === 'signin' ? 'signup' : 'signin'));
+                setAuthMessage('');
+              }}
+            >
+              {authMode === 'signin' ? 'Switch to Sign Up' : 'Switch to Sign In'}
+            </button>
+          </div>
+        </form>
+      </div>
+    );
   }
 
-  async function updateSection(sectionId: string, patch: Partial<SectionRecord>) {
-    setSections((prev) => prev.map((section) => (section.id === sectionId ? { ...section, ...patch, updated_at: now() } : section)));
-    scheduleAutosave('All changes saved', async () => {
-      await supabase.from('sections').update({ ...patch, updated_at: now() }).eq('id', sectionId);
-      await addHistoryEntry('edit', `Updated section: ${patch.title ?? sections.find((s) => s.id === sectionId)?.title ?? 'Section'}`);
-    });
-  }
-
-  async function toggleLock(sectionId: string, locked: boolean) {
-    await updateSection(sectionId, { locked });
-  }
-
-  async function addSection() {
-    if (!userId) return;
-    const position = sections.length + 1;
-    const record: SectionRecord = {
-      id: uuid(),
-      user_id: userId,
-      slug: `section-${position}`,
-      title: `New Section ${position}`,
-      subtitle: 'Edit this subtitle in builder mode',
-      category: 'Custom',
-      content: 'Add your content here.',
-      locked: false,
-      position,
-      created_at: now(),
-      updated_at: now(),
-    };
-    setSections((prev) => [...prev, record]);
-    setActiveSectionId(record.id);
-    scheduleAutosave('Section added', async () => {
-      await supabase.from('sections').insert(record);
-      await addHistoryEntry('section', `Added section: ${record.title}`);
-    });
-  }
-
-  async function addBookmark(section: SectionRecord) {
-    if (!userId) return;
-    const exists = bookmarks.some((bookmark) => bookmark.section_id === section.id);
-    if (exists) return;
-    const record: BookmarkRecord = { id: uuid(), user_id: userId, section_id: section.id, label: section.title, created_at: now() };
-    setBookmarks((prev) => [record, ...prev]);
-    scheduleAutosave('Bookmark saved', async () => {
-      await supabase.from('bookmarks').insert(record);
-      await addHistoryEntry('bookmark', `Bookmarked section: ${section.title}`);
-    });
-  }
-
-  async function createNote(section: SectionRecord) {
-    if (!userId) return;
-    const text = window.prompt('Enter note text');
-    if (!text) return;
-    const record: NoteRecord = {
-      id: uuid(),
-      user_id: userId,
-      section_id: section.id,
-      anchor_key: section.slug,
-      anchor_title: section.title,
-      note_html: `<p>${text.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>`,
-      tags: ['Important'],
-      status: 'open',
-      position_mode: 'floating',
-      x: null,
-      y: null,
-      created_at: now(),
-      updated_at: now(),
-    };
-    setNotes((prev) => [record, ...prev]);
-    scheduleAutosave('Note saved', async () => {
-      await supabase.from('notes').insert(record);
-      await addHistoryEntry('note', `Added note in ${section.title}`);
-    });
-  }
-
-  async function createSnapshot() {
-    if (!userId) return;
-    const label = window.prompt('Snapshot label', `Manual snapshot ${new Date().toLocaleString()}`);
-    if (!label) return;
-    const record: SnapshotRecord = {
-      id: uuid(),
-      user_id: userId,
-      label,
-      data: { sections: sections.map(({ user_id, ...rest }) => rest) },
-      created_at: now(),
-    };
-    setSnapshots((prev) => [record, ...prev].slice(0, 40));
-    scheduleAutosave('Snapshot created', async () => {
-      await supabase.from('snapshots').insert(record);
-      await addHistoryEntry('snapshot', `Created snapshot: ${label}`);
-    });
-  }
-
-  async function restoreSnapshot(snapshotId: string) {
-    const snapshot = snapshots.find((item) => item.id === snapshotId);
-    if (!snapshot || !userId) return;
-    const restoredSections = snapshot.data.sections.map((section, index) => ({ ...section, user_id: userId, position: index + 1, updated_at: now() }));
-    setSections(restoredSections);
-    scheduleAutosave('Snapshot restored', async () => {
-      await supabase.from('sections').delete().eq('user_id', userId);
-      await supabase.from('sections').insert(restoredSections);
-      await addHistoryEntry('restore', `Restored snapshot: ${snapshot.label}`);
-    });
-  }
-
-  const visibleNotes = useMemo(
-    () => notes.reduce<Record<string, NoteRecord[]>>((acc, note) => {
-      acc[note.section_id] = [...(acc[note.section_id] || []), note];
-      return acc;
-    }, {}),
-    [notes],
-  );
-
-  if (!sessionReady) return <div className="loading-shell">Loading…</div>;
-  if (!userId) return <AuthGate />;
+  const showSaqOverlay = activeSection === 'saqref';
 
   return (
-    <div className="app-shell">
-      <LeftSidebar sections={sections} activeSectionId={activeSectionId} onSelect={jumpToSection} onAddSection={addSection} />
-      <main className="main-shell">
-        <header className="topbar">
-          <div>
-            <div className="topbar-title">PCI Helpdesk — Agent Reference Web App</div>
-            <div className="topbar-subtitle">Reference-based starter inspired by the merged HTML layout, workspace FAB panels, autosave pill, bookmarks, backups, and builder workflow.</div>
-          </div>
-          <div className="topbar-actions">
-            <button onClick={() => setBuilderMode((value) => !value)}>{builderMode ? 'Exit Builder' : 'Builder Mode'}</button>
-            <button onClick={createSnapshot}>Create Snapshot</button>
-            <button onClick={() => supabase.auth.signOut()}>Sign Out</button>
-          </div>
-        </header>
+    <div className="bridge-shell">
+      <Sidebar activeSection={activeSection} onNavigate={handleNavigate} />
 
-        <div className="autosave-pill">{autosaveLabel}</div>
+      <div className="bridge-main-shell">
+        <TopBar
+          activeSection={activeSection}
+          searchValue={searchValue}
+          onSearchChange={setSearchValue}
+          onNavigate={handleNavigate}
+          onSignOut={() => void handleSignOut()}
+        />
 
-        <div className="content-shell">
-          {sections.map((section) => (
-            <SectionCard
-              key={section.id}
-              section={section}
-              notes={visibleNotes[section.id] || []}
-              builderMode={builderMode}
-              onUpdateSection={updateSection}
-              onToggleLock={toggleLock}
-              onAddBookmark={addBookmark}
-              onCreateNote={createNote}
+        <div className="bridge-work-area">
+          <div className="bridge-iframe-wrap bridge-iframe-stack">
+            <iframe
+              ref={iframeRef}
+              title="PCI Helpdesk Reference"
+              srcDoc={referenceHtml}
+              className={`bridge-content-frame ${
+                showSaqOverlay || iframeMasked ? 'bridge-frame-hidden' : ''
+              }`}
             />
-          ))}
-        </div>
-      </main>
 
-      <WorkspacePanels
-        openPanel={openPanel}
-        setOpenPanel={setOpenPanel}
-        searchText={searchText}
-        setSearchText={setSearchText}
-        searchType={searchType}
-        setSearchType={setSearchType}
-        sections={sections}
-        notes={notes}
-        bookmarks={bookmarks}
-        snapshots={snapshots}
-        history={history}
-        onJumpToSection={jumpToSection}
-        onRestoreSnapshot={restoreSnapshot}
-      />
+            {iframeMasked ? <div className="bridge-page-mask" /> : null}
+
+            {showSaqOverlay ? (
+              <div className="bridge-page-overlay">
+                <div className="bridge-page-surface">
+                  <SaqReferencePage searchValue={searchValue} />
+                </div>
+              </div>
+            ) : null}
+          </div>
+
+          <RightRail
+            onOpenPanel={handleOpenPanel}
+            onTriggerAction={handleTrigger}
+          />
+        </div>
+      </div>
     </div>
   );
 }

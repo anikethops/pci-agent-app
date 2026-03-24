@@ -1,0 +1,179 @@
+body {
+  margin: 0;
+  font-family: Inter, sans-serif;
+  background: #f5f7fb;
+}
+
+.app {
+  display: flex;
+}
+
+/* Sidebar */
+.sidebar {
+  width: 260px;
+  background: white;
+  padding: 20px;
+  border-right: 1px solid #ddd;
+}
+
+.logo {
+  font-size: 12px;
+  color: #888;
+}
+
+.title {
+  font-size: 18px;
+  margin-bottom: 20px;
+}
+
+.section-title {
+  font-size: 12px;
+  color: #888;
+  margin-top: 20px;
+}
+
+.menu-item {
+  display: block;
+  width: 100%;
+  padding: 10px;
+  border-radius: 8px;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu-item.active {
+  background: #e8f0ff;
+}
+
+/* Main */
+.main {
+  flex: 1;
+  padding: 20px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.subtitle {
+  color: #777;
+}
+
+.header-actions .btn {
+  margin-left: 10px;
+}
+
+.btn {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid #ddd;
+  background: white;
+}
+
+.btn.primary {
+  background: #2f6df6;
+  color: white;
+}
+
+/* Tabs */
+.tabs {
+  margin-top: 20px;
+}
+
+.tab {
+  margin-right: 10px;
+  padding: 8px 14px;
+  border-radius: 20px;
+  border: none;
+  background: #eee;
+}
+
+.tab.active {
+  background: #2f6df6;
+  color: white;
+}
+
+/* Content */
+.content {
+  margin-top: 20px;
+}
+
+.top-actions {
+  margin-bottom: 10px;
+}
+
+.chip {
+  margin-right: 10px;
+  padding: 6px 10px;
+  border-radius: 20px;
+  border: 1px solid #ddd;
+  background: white;
+}
+
+.desc {
+  color: #777;
+}
+
+.card {
+  margin-top: 20px;
+  padding: 16px;
+  border-radius: 12px;
+}
+
+.card.blue {
+  background: #e8f0ff;
+}
+
+.card.green {
+  background: #e7f6ea;
+}
+
+.card.yellow {
+  background: #fff4e0;
+}
+
+.label {
+  font-size: 12px;
+  color: #666;
+  margin-bottom: 8px;
+}
+
+/* Decision */
+.decision {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 8px;
+}
+
+.decision.yes {
+  background: #dff5e4;
+}
+
+.decision.option {
+  background: #e8f0ff;
+}
+
+.decision.no {
+  background: #fde2e2;
+}
+
+/* Floating */
+.floating {
+  position: fixed;
+  right: 20px;
+  bottom: 50px;
+  display: flex;
+  flex-direction: column;
+}
+
+.floating button {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid #ddd;
+  background: white;
+}
